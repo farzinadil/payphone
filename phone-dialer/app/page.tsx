@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, ChangeEventHandler } from "react";
+import { makeCall } from "./lib/actions";
 
 export default function Home() {
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -30,11 +31,7 @@ export default function Home() {
     setPhoneNumber((prev) => prev.slice(0, -1));
   };
 
-  const handleCall = () => {
-    console.log(`Calling: ${countryCode} ${phoneNumber}`);
-    alert(`Calling: ${countryCode} ${phoneNumber}`);
-    // In a real app, you'd integrate with a calling API here
-  };
+  const handleCall = () => makeCall(countryCode, phoneNumber);
 
   const handleCountryCodeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     setCountryCode(e.target.value);
