@@ -29,6 +29,9 @@ export default function Home() {
   // Audio stream references
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   
   // Timer interval reference
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -82,32 +85,126 @@ export default function Home() {
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
   
-  const setupAudioStream = async () => {
-    try {
-      // Request access to the microphone
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioStreamRef.current = stream;
+// Update setupAudioStream function to use the combined server:
+const setupAudioStream = async (callId: string) => {
+  try {
+    // Request access to the microphone
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioStreamRef.current = stream;
+    
+    // Create an audio context
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    audioContextRef.current = audioContext;
+    
+    // Create a source node from the microphone stream
+    const sourceNode = audioContext.createMediaStreamSource(stream);
+    sourceNodeRef.current = sourceNode;
+    
+    // Create a script processor for handling audio data
+    const processor = audioContext.createScriptProcessor(1024, 1, 1);
+    processorRef.current = processor;
+    
+    // Connect the audio nodes
+    sourceNode.connect(processor);
+    processor.connect(audioContext.destination);
+    
+    // Determine WebSocket URL - now uses the same origin as the page
+    const baseUrl = window.location.origin.replace('http', 'ws');
+    const wsUrl = `${baseUrl}/ws/browser/${callId}`;
+    
+    console.log(`Connecting to WebSocket at: ${wsUrl}`);
+    
+    // Create WebSocket connection
+    const socket = new WebSocket(wsUrl);
+    socketRef.current = socket;
+    
+    // Set up WebSocket event handlers
+    socket.onopen = () => {
+      console.log('WebSocket connection established');
       
-      // Create an audio context
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      audioContextRef.current = audioContext;
-      
-      // Create a source node from the microphone stream
-      const sourceNode = audioContext.createMediaStreamSource(stream);
-      
-      // Connect the source to the audio context destination (speakers)
-      // In a real implementation, you would connect this to a WebSocket
-      // for streaming to Vonage
-      sourceNode.connect(audioContext.destination);
-      
-      console.log('Audio stream set up successfully');
-    } catch (error) {
-      console.error('Error setting up audio stream:', error);
-      alert('Unable to access microphone. Please check your browser permissions.');
-    }
-  };
+      // Process audio data from microphone to send over WebSocket
+      processor.onaudioprocess = (e) => {
+        if (socket.readyState === WebSocket.OPEN) {
+          // Get audio data from microphone
+          const inputData = e.inputBuffer.getChannelData(0);
+          
+          // Convert Float32Array to Int16Array for Vonage's L16 format
+          const int16Data = new Int16Array(inputData.length);
+          
+          // Convert floating point samples (-1.0 to 1.0) to int16 (-32768 to 32767)
+          for (let i = 0; i < inputData.length; i++) {
+            int16Data[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+          }
+          
+          socket.send(int16Data.buffer);
+        }
+      };
+    };
+    
+    socket.onmessage = (event) => {
+      // Handle incoming audio data
+      try {
+        // Convert the incoming binary data to an audio buffer
+        const arrayBuffer = event.data;
+        
+        // Convert Int16Array to Float32Array for Web Audio API
+        const int16Data = new Int16Array(arrayBuffer);
+        const floatData = new Float32Array(int16Data.length);
+        
+        // Convert int16 samples to floating point (-1.0 to 1.0)
+        for (let i = 0; i < int16Data.length; i++) {
+          floatData[i] = int16Data[i] / 0x7FFF;
+        }
+        
+        // Create an audio buffer
+        const buffer = audioContext.createBuffer(1, floatData.length, audioContext.sampleRate);
+        buffer.getChannelData(0).set(floatData);
+        
+        // Play the audio
+        const source = audioContext.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioContext.destination);
+        source.start();
+      } catch (error) {
+        console.error('Error processing incoming audio:', error);
+      }
+    };
+    
+    socket.onclose = () => {
+      console.log('WebSocket connection closed');
+    };
+    
+    socket.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+    
+    console.log('Audio stream set up successfully');
+  } catch (error) {
+    console.error('Error setting up audio stream:', error);
+    alert('Unable to access microphone. Please check your browser permissions.');
+  }
+};
   
   const cleanupAudioStream = () => {
+    // Close WebSocket connection
+    if (socketRef.current) {
+      if (socketRef.current.readyState === WebSocket.OPEN) {
+        socketRef.current.close();
+      }
+      socketRef.current = null;
+    }
+    
+    // Disconnect audio processing
+    if (processorRef.current) {
+      processorRef.current.disconnect();
+      processorRef.current = null;
+    }
+    
+    if (sourceNodeRef.current) {
+      sourceNodeRef.current.disconnect();
+      sourceNodeRef.current = null;
+    }
+    
     // Stop all audio tracks
     if (audioStreamRef.current) {
       audioStreamRef.current.getTracks().forEach(track => track.stop());
@@ -138,9 +235,6 @@ export default function Home() {
         // Clean the phone number (remove any non-numeric characters except +)
         const fullNumber = `${countryCode}${phoneNumber}`.replace(/[^0-9+]/g, '');
         
-        // Set up audio stream before initiating the call
-        await setupAudioStream();
-        
         // Call our API route to initiate the call
         const response = await fetch('/api/call', {
           method: 'POST',
@@ -167,20 +261,17 @@ export default function Home() {
           // Start the call timer
           startCallTimer();
           
+          // Set up audio stream with the call ID
+          await setupAudioStream(data.callId);
+          
         } else {
           const errorData = await response.json();
           console.error('Error initiating call:', errorData);
           alert(`Error initiating call: ${errorData.error || 'Unknown error'}`);
-          
-          // Clean up audio resources on error
-          cleanupAudioStream();
         }
       } catch (error) {
         console.error('Error making API call:', error);
         alert('Failed to initiate call. See console for details.');
-        
-        // Clean up audio resources on error
-        cleanupAudioStream();
       }
     }
   };
@@ -228,7 +319,7 @@ export default function Home() {
   const handleCountryCodeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     setCountryCode(e.target.value);
   };
-  
+
   // Clean up resources when component unmounts
   useEffect(() => {
     return () => {
