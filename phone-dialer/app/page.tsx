@@ -16,6 +16,7 @@ interface CallState {
 }
 
 export default function Home() {
+  const [isConnected, setIsConnected] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState<string>('');
   const [countryCode, setCountryCode] = useState<string>('+1');
   const [isFocused, setIsFocused] = useState<boolean>(false);
@@ -86,11 +87,15 @@ export default function Home() {
   };
   
 // Update setupAudioStream function to use the combined server:
+// Updated setupAudioStream function for page.tsx
 const setupAudioStream = async (callId: string) => {
   try {
+    console.log(`Setting up audio stream for call ${callId}`);
+    
     // Request access to the microphone
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     audioStreamRef.current = stream;
+    console.log('Microphone access granted');
     
     // Create an audio context
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -108,19 +113,20 @@ const setupAudioStream = async (callId: string) => {
     sourceNode.connect(processor);
     processor.connect(audioContext.destination);
     
-    // Determine WebSocket URL - now uses the same origin as the page
-    const baseUrl = window.location.origin.replace('http', 'ws');
-    const wsUrl = `${baseUrl}/ws/browser/${callId}`;
-    
+    // Get WebSocket URL using the same origin as the page
+    // Use the path format that we've verified works
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/browser/${callId}`;
     console.log(`Connecting to WebSocket at: ${wsUrl}`);
     
     // Create WebSocket connection
     const socket = new WebSocket(wsUrl);
     socketRef.current = socket;
     
-    // Set up WebSocket event handlers
+    // Add detailed logging for WebSocket events
     socket.onopen = () => {
       console.log('WebSocket connection established');
+      setIsConnected(true);
       
       // Process audio data from microphone to send over WebSocket
       processor.onaudioprocess = (e) => {
@@ -142,7 +148,22 @@ const setupAudioStream = async (callId: string) => {
     };
     
     socket.onmessage = (event) => {
-      // Handle incoming audio data
+      console.log(`Received WebSocket message: ${typeof event.data}`, 
+                  event.data instanceof ArrayBuffer ? `Binary data: ${event.data.byteLength} bytes` : 'Text data');
+      
+      // If we receive a text message (likely JSON)
+      if (typeof event.data === 'string') {
+        try {
+          const jsonData = JSON.parse(event.data);
+          console.log('Received JSON message:', jsonData);
+          return; // Skip audio processing for text messages
+        } catch (error) {
+          console.log('Received text message (not JSON):', event.data);
+          return; // Skip audio processing for text messages
+        }
+      }
+      
+      // Handle incoming audio data (binary message)
       try {
         // Convert the incoming binary data to an audio buffer
         const arrayBuffer = event.data;
@@ -170,53 +191,59 @@ const setupAudioStream = async (callId: string) => {
       }
     };
     
-    socket.onclose = () => {
-      console.log('WebSocket connection closed');
+    socket.onclose = (event) => {
+      console.log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'None provided'}`);
+      setIsConnected(false);
     };
     
     socket.onerror = (error) => {
       console.error('WebSocket error:', error);
+      setIsConnected(false);
     };
     
     console.log('Audio stream set up successfully');
+    return true;
   } catch (error) {
     console.error('Error setting up audio stream:', error);
     alert('Unable to access microphone. Please check your browser permissions.');
+    return false;
   }
 };
   
-  const cleanupAudioStream = () => {
-    // Close WebSocket connection
-    if (socketRef.current) {
-      if (socketRef.current.readyState === WebSocket.OPEN) {
-        socketRef.current.close();
-      }
-      socketRef.current = null;
-    }
-    
-    // Disconnect audio processing
-    if (processorRef.current) {
-      processorRef.current.disconnect();
-      processorRef.current = null;
-    }
-    
-    if (sourceNodeRef.current) {
-      sourceNodeRef.current.disconnect();
-      sourceNodeRef.current = null;
-    }
-    
-    // Stop all audio tracks
-    if (audioStreamRef.current) {
-      audioStreamRef.current.getTracks().forEach(track => track.stop());
-      audioStreamRef.current = null;
-    }
-    
-    // Close audio context
-    if (audioContextRef.current) {
+const cleanupAudioStream = () => {
+  console.log('Cleaning up audio stream');
+  
+  // Close WebSocket connection
+  if (socketRef.current) {
+    console.log('Closing WebSocket connection');
+    socketRef.current.close();
+    socketRef.current = null;
+  }
+  
+  // Disconnect audio processing
+  if (processorRef.current && sourceNodeRef.current) {
+    console.log('Disconnecting audio processor');
+    sourceNodeRef.current.disconnect();
+    processorRef.current.disconnect();
+  }
+  
+  // Close audio context
+  if (audioContextRef.current) {
+    console.log('Closing audio context');
+    if (audioContextRef.current.state !== 'closed') {
       audioContextRef.current.close();
-      audioContextRef.current = null;
     }
-  };
+  }
+  
+  // Stop microphone stream
+  if (audioStreamRef.current) {
+    console.log('Stopping microphone stream');
+    audioStreamRef.current.getTracks().forEach(track => track.stop());
+    audioStreamRef.current = null;
+  }
+  
+  setIsConnected(false);
+};
   
   const handleCall = async () => {
     if (callState.isActive) {
@@ -235,6 +262,12 @@ const setupAudioStream = async (callId: string) => {
         // Clean the phone number (remove any non-numeric characters except +)
         const fullNumber = `${countryCode}${phoneNumber}`.replace(/[^0-9+]/g, '');
         
+        // Update UI to show we're initiating a call
+        setCallState({
+          ...callState,
+          isInitiating: true
+        });
+        
         // Call our API route to initiate the call
         const response = await fetch('/api/call', {
           method: 'POST',
@@ -246,13 +279,15 @@ const setupAudioStream = async (callId: string) => {
           })
         });
         
-        if (response.ok) {
-          const data = await response.json();
+        const data = await response.json();
+        
+        if (response.ok && data.success) {
           console.log('Call initiated successfully:', data);
           
           // Update call state
           setCallState({
             isActive: true,
+            isInitiating: false,
             callId: data.callId,
             startTime: new Date(),
             duration: 0
@@ -262,15 +297,38 @@ const setupAudioStream = async (callId: string) => {
           startCallTimer();
           
           // Set up audio stream with the call ID
-          await setupAudioStream(data.callId);
+          const setupSuccess = await setupAudioStream(data.callId);
+          if (!setupSuccess) {
+            console.error('Failed to set up audio stream');
+            // Consider whether to end the call here
+          }
           
         } else {
-          const errorData = await response.json();
-          console.error('Error initiating call:', errorData);
-          alert(`Error initiating call: ${errorData.error || 'Unknown error'}`);
+          console.error('Error initiating call:', data);
+          
+          // Reset call state
+          setCallState({
+            isActive: false,
+            isInitiating: false,
+            callId: null,
+            startTime: null,
+            duration: 0
+          });
+          
+          alert(`Error initiating call: ${data.error || 'Unknown error'}`);
         }
       } catch (error) {
         console.error('Error making API call:', error);
+        
+        // Reset call state
+        setCallState({
+          isActive: false,
+          isInitiating: false,
+          callId: null,
+          startTime: null,
+          duration: 0
+        });
+        
         alert('Failed to initiate call. See console for details.');
       }
     }
@@ -283,6 +341,12 @@ const setupAudioStream = async (callId: string) => {
     }
     
     try {
+      // Update UI to show we're ending the call
+      setCallState({
+        ...callState,
+        isEnding: true
+      });
+      
       const response = await fetch('/api/call', {
         method: 'PUT',
         headers: {
@@ -293,12 +357,13 @@ const setupAudioStream = async (callId: string) => {
         })
       });
       
-      if (response.ok) {
+      const data = await response.json();
+      
+      if (response.ok && data.success) {
         console.log('Call ended successfully');
       } else {
-        const errorData = await response.json();
-        console.error('Error ending call:', errorData);
-        alert(`Error ending call: ${errorData.error || 'Unknown error'}`);
+        console.error('Error ending call:', data);
+        alert(`Error ending call: ${data.error || 'Unknown error'}`);
       }
     } catch (error) {
       console.error('Error making end call API call:', error);
@@ -309,6 +374,8 @@ const setupAudioStream = async (callId: string) => {
       
       setCallState({
         isActive: false,
+        isInitiating: false,
+        isEnding: false,
         callId: null,
         startTime: null,
         duration: 0

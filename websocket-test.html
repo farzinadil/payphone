@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #log { height: 300px; border: 1px solid #ccc; overflow-y: scroll; padding: 10px; margin: 10px 0; }
+        button { padding: 8px 16px; margin-right: 10px; }
+    </style>
+</head>
+<body>
+    <h1>WebSocket Connection Test</h1>
+    
+    <div>
+        <label for="wsUrl">WebSocket URL:</label>
+        <input type="text" id="wsUrl" style="width: 400px;" 
+               value="ws://localhost:3000/ws" />
+        <button onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+    </div>
+    
+    <div>
+        <label for="message">Message:</label>
+        <input type="text" id="message" style="width: 300px;" value="Hello from browser" />
+        <button onclick="sendMessage()">Send</button>
+    </div>
+    
+    <div id="log"></div>
+    
+    <script>
+        let socket = null;
+        
+        function log(message) {
+            const logElement = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            logElement.innerHTML += `<div>[${time}] ${message}</div>`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        function connect() {
+            const url = document.getElementById('wsUrl').value;
+            
+            if (socket) {
+                log("Already connected. Disconnect first.");
+                return;
+            }
+            
+            log(`Connecting to ${url}...`);
+            
+            socket = new WebSocket(url);
+            
+            socket.onopen = function() {
+                log("Connection established!");
+            };
+            
+            socket.onmessage = function(event) {
+                if (typeof event.data === 'string') {
+                    log(`Received text: ${event.data}`);
+                } else {
+                    log(`Received binary data: ${event.data.size} bytes`);
+                }
+            };
+            
+            socket.onclose = function(event) {
+                log(`Connection closed. Code: ${event.code}, Reason: ${event.reason || 'None'}`);
+                socket = null;
+            };
+            
+            socket.onerror = function(error) {
+                console.error("WebSocket Error:", error);
+                log(`Error occurred. Check browser console for details.`);
+            };
+        }
+        
+        function disconnect() {
+            if (!socket) {
+                log("Not connected.");
+                return;
+            }
+            
+            socket.close();
+            log("Disconnecting...");
+        }
+        
+        function sendMessage() {
+            if (!socket) {
+                log("Not connected.");
+                return;
+            }
+            
+            const message = document.getElementById('message').value;
+            socket.send(message);
+            log(`Sent: ${message}`);
+        }
+    </script>
+</body>
+</html>

@@ -1,5 +1,4 @@
-// app/lib/vonage.tsx - Updated to use the combined server
-
+// app/lib/vonage.tsx - Further improved version
 import jwt from 'jsonwebtoken';
 
 // Define types for TypeScript
@@ -8,10 +7,13 @@ interface CallResponse {
   message: string;
   callId?: string;
   error?: string;
+  details?: any;
 }
 
 export async function initiateCall(toNumber: string): Promise<CallResponse> {
   try {
+    console.log(`Initiating call to ${toNumber}`);
+    
     // Validate the phone number
     if (!toNumber || toNumber.length < 5) {
       throw new Error('Invalid phone number');
@@ -45,12 +47,43 @@ export async function initiateCall(toNumber: string): Promise<CallResponse> {
     // Generate a unique call identifier
     const callId = Math.random().toString(36).substring(2, 15);
     
-    // Get the base URL - this will be your ngrok URL for local development
+    // Get the base URL
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-    const wsUrl = baseUrl.replace('http', 'ws') + '/ws/vonage/' + callId;
-    const eventUrl = `${baseUrl}/api/vonage-events`;
+    console.log(`Using base URL: ${baseUrl}`);
     
-    console.log(`WebSocket URL for Vonage: ${wsUrl}`);
+    // Simple NCCO with longer greeting
+    const ncco = [
+      {
+        "action": "talk",
+        "text": "Hello, this is a test call from the digital payphone app. Please wait while we connect you.",
+        "language": "en-US"
+      },
+      {
+        "action": "connect",
+        "from": fromNumber,
+        "endpoint": [{
+          "type": "websocket",
+          "uri": "wss://echo.websocket.org",
+          "content-type": "audio/l16;rate=16000"
+        }]
+      }
+    ];
+    
+    // Create the call details object
+    const callDetails = {
+      "from": {
+        "type": "phone",
+        "number": fromNumber
+      },
+      "to": [{
+        "type": "phone",
+        "number": toNumber
+      }],
+      "ncco": ncco,
+      "eventUrl": [`${baseUrl}/api/vonage-events`]
+    };
+    
+    console.log('Making Vonage API call with:', JSON.stringify(callDetails, null, 2));
     
     // Make the call to Vonage API
     const response = await fetch('https://api.nexmo.com/v1/calls', {
@@ -59,49 +92,31 @@ export async function initiateCall(toNumber: string): Promise<CallResponse> {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({
-        "from": {
-          "type": "phone",
-          "number": fromNumber
-        },
-        "to": [{
-          "type": "phone",
-          "number": toNumber
-        }],
-        "ncco": [
-          {
-            "action": "talk",
-            "text": "Hello, this is a test call from the digital payphone app.",
-            "language": "en-US"
-          },
-          {
-            "action": "connect",
-            "endpoint": [{
-              "type": "websocket",
-              "uri": wsUrl,
-              "content-type": "audio/l16;rate=16000",
-              "headers": {
-                "callId": callId
-              }
-            }]
-          }
-        ],
-        "eventUrl": [eventUrl]
-      })
+      body: JSON.stringify(callDetails)
     });
     
     const responseData = await response.json();
     
     if (!response.ok) {
       console.error('Vonage API error:', responseData);
-      throw new Error(responseData.title || responseData.error_title || 'Failed to initiate call');
+      return {
+        success: false,
+        message: 'Failed to initiate call',
+        error: responseData.title || responseData.error_title || 'Unknown error',
+        details: responseData
+      };
     }
     
-    // Return the call ID - we use both the Vonage UUID and our custom callId
+    console.log('Successful call response:', responseData);
+    
+    // Return the call ID
     return {
       success: true,
       message: 'Call initiated successfully',
-      callId: callId
+      callId: responseData.uuid || callId,
+      details: {
+        ourCallId: callId
+      }
     };
     
   } catch (error: any) {
@@ -116,6 +131,8 @@ export async function initiateCall(toNumber: string): Promise<CallResponse> {
 
 export async function endCall(callId: string): Promise<CallResponse> {
   try {
+    console.log(`Attempting to end call ${callId}`);
+    
     // Get Vonage credentials from environment variables
     const privateKey = process.env.VONAGE_PRIVATE_KEY;
     const applicationId = process.env.VONAGE_APPLICATION_ID;
@@ -148,10 +165,16 @@ export async function endCall(callId: string): Promise<CallResponse> {
     });
     
     const responseData = await response.json();
+    console.log(`End call response for ${callId}:`, responseData);
     
     if (!response.ok) {
       console.error('Vonage API error when ending call:', responseData);
-      throw new Error(responseData.error_title || responseData.title || 'Failed to end call');
+      return {
+        success: false,
+        message: 'Failed to end call',
+        error: responseData.error_title || responseData.title || 'Unknown error',
+        details: responseData
+      };
     }
     
     return {
