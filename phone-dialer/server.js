@@ -16,85 +16,86 @@ const browserConnections = new Map();
 // Prepare Next.js app, then set up the server
 app.prepare().then(() => {
   const server = createServer((req, res) => {
+    console.log(`HTTP: ${req.method} ${req.url}`);
     const parsedUrl = parse(req.url, true);
     handle(req, res, parsedUrl);
   });
 
-  // Create WebSocket server attached to the same HTTP server
+  // Create WebSocket server with base path
   const wss = new WebSocket.Server({ 
     server,
-    path: '/ws'  // All WebSocket connections will use this path
+    path: '/ws'  // Handle all connections under /ws
   });
 
-  // Handle WebSocket connections
+  // Log connection attempts
   wss.on('connection', (ws, req) => {
     const { pathname } = parse(req.url);
+    console.log(`WebSocket connected: ${pathname}`);
     
-    if (pathname.startsWith('/ws/vonage')) {
-      // This is a connection from Vonage
-      const callId = pathname.split('/').pop();
-      console.log(`Vonage connected for call: ${callId}`);
-      
+    // Extract call ID and connection type from pathname
+    // Pathname will be like /ws or /ws/vonage/callId or /ws/browser/callId
+    let callId = null;
+    let connectionType = 'generic';
+    
+    if (pathname.includes('/vonage/')) {
+      connectionType = 'vonage';
+      callId = pathname.split('/vonage/')[1];
+      console.log(`Vonage connection for call: ${callId}`);
       vonageConnections.set(callId, ws);
-      
-      // Check if we already have a browser connection for this call
-      const browserWs = browserConnections.get(callId);
-      if (browserWs && browserWs.readyState === WebSocket.OPEN) {
-        console.log(`Linking existing browser connection for call: ${callId}`);
-      }
-      
-      // Handle audio data from Vonage
-      ws.on('message', (message) => {
+    } else if (pathname.includes('/browser/')) {
+      connectionType = 'browser';
+      callId = pathname.split('/browser/')[1];
+      console.log(`Browser connection for call: ${callId}`);
+      browserConnections.set(callId, ws);
+    }
+    
+    // Send welcome message
+    ws.send(JSON.stringify({ 
+      message: 'Connected to WebSocket server',
+      type: connectionType,
+      callId,
+      time: new Date().toISOString()
+    }));
+    
+    // Handle messages
+    ws.on('message', (message) => {
+      if (connectionType === 'vonage' && callId) {
+        console.log(`Received ${message.length} bytes from Vonage for call ${callId}`);
+        // Forward to browser if connected
         const browserWs = browserConnections.get(callId);
         if (browserWs && browserWs.readyState === WebSocket.OPEN) {
-          // Forward audio to browser
           browserWs.send(message);
         }
-      });
-      
-      // Handle Vonage disconnection
-      ws.on('close', () => {
-        console.log(`Vonage disconnected for call: ${callId}`);
-        vonageConnections.delete(callId);
-        
-        // Optionally close the browser connection too
-        const browserWs = browserConnections.get(callId);
-        if (browserWs && browserWs.readyState === WebSocket.OPEN) {
-          browserWs.close();
-          browserConnections.delete(callId);
-        }
-      });
-      
-    } else if (pathname.startsWith('/ws/browser')) {
-      // This is a connection from the browser
-      const callId = pathname.split('/').pop();
-      console.log(`Browser connected for call: ${callId}`);
-      
-      browserConnections.set(callId, ws);
-      
-      // Check if we already have a Vonage connection for this call
-      const vonageWs = vonageConnections.get(callId);
-      if (vonageWs && vonageWs.readyState === WebSocket.OPEN) {
-        console.log(`Linking existing Vonage connection for call: ${callId}`);
-      }
-      
-      // Handle audio data from browser
-      ws.on('message', (message) => {
+      } else if (connectionType === 'browser' && callId) {
+        console.log(`Received ${message.length} bytes from browser for call ${callId}`);
+        // Forward to Vonage if connected
         const vonageWs = vonageConnections.get(callId);
         if (vonageWs && vonageWs.readyState === WebSocket.OPEN) {
-          // Forward audio to Vonage
           vonageWs.send(message);
         }
-      });
-      
-      // Handle browser disconnection
-      ws.on('close', () => {
-        console.log(`Browser disconnected for call: ${callId}`);
+      } else {
+        console.log(`Received message from generic connection: ${message.toString().substring(0, 100)}`);
+        // Echo back
+        ws.send(`Echo: ${message.toString().substring(0, 100)}`);
+      }
+    });
+    
+    // Handle close
+    ws.on('close', (code, reason) => {
+      console.log(`WebSocket closed. Type: ${connectionType}, CallID: ${callId}, Code: ${code}, Reason: ${reason || 'None'}`);
+      if (connectionType === 'vonage' && callId) {
+        vonageConnections.delete(callId);
+      } else if (connectionType === 'browser' && callId) {
         browserConnections.delete(callId);
-      });
-    }
+      }
+    });
+    
+    // Handle errors
+    ws.on('error', (error) => {
+      console.error(`WebSocket error. Type: ${connectionType}, CallID: ${callId}`, error);
+    });
   });
-
+  
   // Start the server
   const PORT = process.env.PORT || 3000;
   server.listen(PORT, (err) => {
