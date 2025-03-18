@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { useWebRTC } from './lib/webrtc-client';
 
 // TypeScript interfaces
 interface CountryCode {
@@ -10,32 +11,60 @@ interface CountryCode {
 
 interface CallState {
   isActive: boolean;
+  isInitiating?: boolean;
+  isEnding?: boolean;
   callId: string | null;
+  vonageCallId: string | null;
   startTime: Date | null;
   duration: number;
 }
 
 export default function Home() {
-  const [isConnected, setIsConnected] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState<string>('');
   const [countryCode, setCountryCode] = useState<string>('+1');
   const [isFocused, setIsFocused] = useState<boolean>(false);
   const [callState, setCallState] = useState<CallState>({
     isActive: false,
     callId: null,
+    vonageCallId: null,
     startTime: null,
     duration: 0
   });
   
-  // Audio stream references
-  const audioStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  // Generate a unique session ID for this page load
+  const sessionIdRef = useRef<string>(Math.random().toString(36).substring(2, 15));
   
   // Timer interval reference
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Status check interval reference
+  const statusCheckRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Initialize WebRTC
+  const { 
+    isConnected: isWebRTCConnected,
+    isConnecting: isWebRTCConnecting,
+    initialize: initializeWebRTC,
+    disconnect: disconnectWebRTC,
+    sendMessage: sendWebRTCMessage
+  } = useWebRTC({
+    callId: sessionIdRef.current,
+    onConnected: () => {
+      console.log('WebRTC connected successfully');
+    },
+    onDisconnected: () => {
+      console.log('WebRTC disconnected');
+      if (callState.isActive) {
+        endCurrentCall();
+      }
+    },
+    onError: (error) => {
+      console.error('WebRTC error:', error);
+      if (callState.isActive) {
+        endCurrentCall(true);
+      }
+    }
+  });
   
   // List of country codes for the dropdown
   const countryCodes: CountryCode[] = [
@@ -80,170 +109,47 @@ export default function Home() {
     }
   };
   
+  // Start status check for the call
+  const startStatusCheck = (vonageCallId: string) => {
+    if (statusCheckRef.current) {
+      clearInterval(statusCheckRef.current);
+    }
+    
+    // Check call status every 2 seconds
+    statusCheckRef.current = setInterval(async () => {
+      try {
+        // Use the simplified API endpoint
+        const response = await fetch(`/api/call-completed?callId=${vonageCallId}`);
+        
+        if (response.ok) {
+          const data = await response.json();
+          
+          // If the call is completed according to our records
+          if (data.completed) {
+            console.log('Call completed, ending call in UI');
+            endCurrentCall(true); // Skip API call to avoid "Bad Request"
+            return;
+          }
+        }
+      } catch (error) {
+        console.error('Error checking call status:', error);
+      }
+    }, 2000);
+  };
+  
+  
+  const stopStatusCheck = () => {
+    if (statusCheckRef.current) {
+      clearInterval(statusCheckRef.current);
+      statusCheckRef.current = null;
+    }
+  };
+  
   const formatDuration = (seconds: number): string => {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
     return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
-  
-// Update setupAudioStream function to use the combined server:
-// Updated setupAudioStream function for page.tsx
-const setupAudioStream = async (callId: string) => {
-  try {
-    console.log(`Setting up audio stream for call ${callId}`);
-    
-    // Request access to the microphone
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    audioStreamRef.current = stream;
-    console.log('Microphone access granted');
-    
-    // Create an audio context
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-    audioContextRef.current = audioContext;
-    
-    // Create a source node from the microphone stream
-    const sourceNode = audioContext.createMediaStreamSource(stream);
-    sourceNodeRef.current = sourceNode;
-    
-    // Create a script processor for handling audio data
-    const processor = audioContext.createScriptProcessor(1024, 1, 1);
-    processorRef.current = processor;
-    
-    // Connect the audio nodes
-    sourceNode.connect(processor);
-    processor.connect(audioContext.destination);
-    
-    // Get WebSocket URL using the same origin as the page
-    // Use the path format that we've verified works
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/browser/${callId}`;
-    console.log(`Connecting to WebSocket at: ${wsUrl}`);
-    
-    // Create WebSocket connection
-    const socket = new WebSocket(wsUrl);
-    socketRef.current = socket;
-    
-    // Add detailed logging for WebSocket events
-    socket.onopen = () => {
-      console.log('WebSocket connection established');
-      setIsConnected(true);
-      
-      // Process audio data from microphone to send over WebSocket
-      processor.onaudioprocess = (e) => {
-        if (socket.readyState === WebSocket.OPEN) {
-          // Get audio data from microphone
-          const inputData = e.inputBuffer.getChannelData(0);
-          
-          // Convert Float32Array to Int16Array for Vonage's L16 format
-          const int16Data = new Int16Array(inputData.length);
-          
-          // Convert floating point samples (-1.0 to 1.0) to int16 (-32768 to 32767)
-          for (let i = 0; i < inputData.length; i++) {
-            int16Data[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
-          }
-          
-          socket.send(int16Data.buffer);
-        }
-      };
-    };
-    
-    socket.onmessage = (event) => {
-      console.log(`Received WebSocket message: ${typeof event.data}`, 
-                  event.data instanceof ArrayBuffer ? `Binary data: ${event.data.byteLength} bytes` : 'Text data');
-      
-      // If we receive a text message (likely JSON)
-      if (typeof event.data === 'string') {
-        try {
-          const jsonData = JSON.parse(event.data);
-          console.log('Received JSON message:', jsonData);
-          return; // Skip audio processing for text messages
-        } catch (error) {
-          console.log('Received text message (not JSON):', event.data);
-          return; // Skip audio processing for text messages
-        }
-      }
-      
-      // Handle incoming audio data (binary message)
-      try {
-        // Convert the incoming binary data to an audio buffer
-        const arrayBuffer = event.data;
-        
-        // Convert Int16Array to Float32Array for Web Audio API
-        const int16Data = new Int16Array(arrayBuffer);
-        const floatData = new Float32Array(int16Data.length);
-        
-        // Convert int16 samples to floating point (-1.0 to 1.0)
-        for (let i = 0; i < int16Data.length; i++) {
-          floatData[i] = int16Data[i] / 0x7FFF;
-        }
-        
-        // Create an audio buffer
-        const buffer = audioContext.createBuffer(1, floatData.length, audioContext.sampleRate);
-        buffer.getChannelData(0).set(floatData);
-        
-        // Play the audio
-        const source = audioContext.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioContext.destination);
-        source.start();
-      } catch (error) {
-        console.error('Error processing incoming audio:', error);
-      }
-    };
-    
-    socket.onclose = (event) => {
-      console.log(`WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason || 'None provided'}`);
-      setIsConnected(false);
-    };
-    
-    socket.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setIsConnected(false);
-    };
-    
-    console.log('Audio stream set up successfully');
-    return true;
-  } catch (error) {
-    console.error('Error setting up audio stream:', error);
-    alert('Unable to access microphone. Please check your browser permissions.');
-    return false;
-  }
-};
-  
-const cleanupAudioStream = () => {
-  console.log('Cleaning up audio stream');
-  
-  // Close WebSocket connection
-  if (socketRef.current) {
-    console.log('Closing WebSocket connection');
-    socketRef.current.close();
-    socketRef.current = null;
-  }
-  
-  // Disconnect audio processing
-  if (processorRef.current && sourceNodeRef.current) {
-    console.log('Disconnecting audio processor');
-    sourceNodeRef.current.disconnect();
-    processorRef.current.disconnect();
-  }
-  
-  // Close audio context
-  if (audioContextRef.current) {
-    console.log('Closing audio context');
-    if (audioContextRef.current.state !== 'closed') {
-      audioContextRef.current.close();
-    }
-  }
-  
-  // Stop microphone stream
-  if (audioStreamRef.current) {
-    console.log('Stopping microphone stream');
-    audioStreamRef.current.getTracks().forEach(track => track.stop());
-    audioStreamRef.current = null;
-  }
-  
-  setIsConnected(false);
-};
   
   const handleCall = async () => {
     if (callState.isActive) {
@@ -263,10 +169,13 @@ const cleanupAudioStream = () => {
         const fullNumber = `${countryCode}${phoneNumber}`.replace(/[^0-9+]/g, '');
         
         // Update UI to show we're initiating a call
-        setCallState({
-          ...callState,
+        setCallState(prev => ({
+          ...prev,
           isInitiating: true
-        });
+        }));
+        
+        // Initialize WebRTC
+        await initializeWebRTC();
         
         // Call our API route to initiate the call
         const response = await fetch('/api/call', {
@@ -275,7 +184,8 @@ const cleanupAudioStream = () => {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            toNumber: fullNumber
+            toNumber: fullNumber,
+            sessionId: sessionIdRef.current
           })
         });
         
@@ -288,7 +198,8 @@ const cleanupAudioStream = () => {
           setCallState({
             isActive: true,
             isInitiating: false,
-            callId: data.callId,
+            callId: sessionIdRef.current,
+            vonageCallId: data.callId,
             startTime: new Date(),
             duration: 0
           });
@@ -296,21 +207,21 @@ const cleanupAudioStream = () => {
           // Start the call timer
           startCallTimer();
           
-          // Set up audio stream with the call ID
-          const setupSuccess = await setupAudioStream(data.callId);
-          if (!setupSuccess) {
-            console.error('Failed to set up audio stream');
-            // Consider whether to end the call here
-          }
+          // Start status check
+          startStatusCheck(data.callId);
           
         } else {
           console.error('Error initiating call:', data);
+          
+          // Disconnect WebRTC if call initiation failed
+          disconnectWebRTC();
           
           // Reset call state
           setCallState({
             isActive: false,
             isInitiating: false,
             callId: null,
+            vonageCallId: null,
             startTime: null,
             duration: 0
           });
@@ -320,11 +231,15 @@ const cleanupAudioStream = () => {
       } catch (error) {
         console.error('Error making API call:', error);
         
+        // Disconnect WebRTC
+        disconnectWebRTC();
+        
         // Reset call state
         setCallState({
           isActive: false,
           isInitiating: false,
           callId: null,
+          vonageCallId: null,
           startTime: null,
           duration: 0
         });
@@ -334,49 +249,68 @@ const cleanupAudioStream = () => {
     }
   };
   
-  const endCurrentCall = async () => {
-    if (!callState.callId) {
+  const endCurrentCall = async (skipApiCall = false) => {
+    if (!callState.vonageCallId && !skipApiCall) {
       console.error('No active call ID to end');
       return;
     }
     
     try {
       // Update UI to show we're ending the call
-      setCallState({
-        ...callState,
+      setCallState(prev => ({
+        ...prev,
         isEnding: true
-      });
+      }));
       
-      const response = await fetch('/api/call', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          callId: callState.callId
-        })
-      });
+      // Disconnect WebRTC
+      disconnectWebRTC();
       
-      const data = await response.json();
+      // Stop status check
+      stopStatusCheck();
       
-      if (response.ok && data.success) {
-        console.log('Call ended successfully');
-      } else {
-        console.error('Error ending call:', data);
-        alert(`Error ending call: ${data.error || 'Unknown error'}`);
+      // Only make the API call if we're not skipping it
+      if (!skipApiCall && callState.vonageCallId) {
+        try {
+          // First check if the call is already completed
+          const checkResponse = await fetch(`/api/call-completed?callId=${callState.vonageCallId}`);
+          const checkData = await checkResponse.json();
+          
+          // Only try to end the call if it's not already completed
+          if (!checkData.completed) {
+            const response = await fetch('/api/call', {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                callId: callState.vonageCallId
+              })
+            });
+            
+            const data = await response.json();
+            
+            if (response.ok && data.success) {
+              console.log('Call ended successfully');
+            } else {
+              console.error('Error ending call:', data);
+            }
+          } else {
+            console.log('Call already completed, skipping end call API request');
+          }
+        } catch (error) {
+          console.error('Error making end call API call:', error);
+        }
       }
-    } catch (error) {
-      console.error('Error making end call API call:', error);
     } finally {
       // Regardless of API success, clean up local state
       stopCallTimer();
-      cleanupAudioStream();
       
       setCallState({
         isActive: false,
         isInitiating: false,
         isEnding: false,
         callId: null,
+        vonageCallId: null,
         startTime: null,
         duration: 0
       });
@@ -391,7 +325,8 @@ const cleanupAudioStream = () => {
   useEffect(() => {
     return () => {
       stopCallTimer();
-      cleanupAudioStream();
+      stopStatusCheck();
+      disconnectWebRTC();
     };
   }, []);
   
@@ -423,6 +358,25 @@ const cleanupAudioStream = () => {
     };
   }, [isFocused, phoneNumber, callState.isActive]); // Add dependencies
   
+  // Add a listener for beforeunload to clean up active calls
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (callState.isActive && callState.vonageCallId) {
+        // Make a synchronous request to end the call
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', '/api/call', false); // false makes it synchronous
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.send(JSON.stringify({ callId: callState.vonageCallId }));
+      }
+    };
+    
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [callState.isActive, callState.vonageCallId]);
+  
   return (
     <div className="flex justify-center items-center min-h-screen bg-gray-100">
       <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-md">
@@ -435,6 +389,16 @@ const cleanupAudioStream = () => {
             <span className="text-xl font-semibold">
               Call Duration: {formatDuration(callState.duration)}
             </span>
+            {isWebRTCConnected && (
+              <div className="mt-2 text-green-600 text-sm">
+                Connected
+              </div>
+            )}
+            {isWebRTCConnecting && (
+              <div className="mt-2 text-yellow-600 text-sm">
+                Connecting...
+              </div>
+            )}
           </div>
         )}
         
@@ -499,14 +463,17 @@ const cleanupAudioStream = () => {
           className={`p-4 rounded-md w-full text-xl font-semibold flex items-center justify-center ${
             callState.isActive 
               ? 'bg-red-500 hover:bg-red-600 text-white' 
-              : 'bg-green-300 hover:bg-green-400 text-white'
-          }`}
+              : 'bg-green-500 hover:bg-green-600 text-white'
+          } ${(callState.isInitiating || callState.isEnding) ? 'opacity-70' : ''}`}
           onClick={handleCall}
+          disabled={callState.isInitiating || callState.isEnding}
         >
           <span className="mr-2">
             {callState.isActive ? '⏹' : '☎'}
           </span>
-          {callState.isActive ? 'Hang Up' : 'Call'}
+          {callState.isInitiating ? 'Connecting...' : 
+           callState.isEnding ? 'Hanging Up...' :
+           callState.isActive ? 'Hang Up' : 'Call'}
         </button>
       </div>
     </div>
