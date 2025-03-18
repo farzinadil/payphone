@@ -1,0 +1,22 @@
+{
+  "timestamp": "2025-03-18T03-00-46-784Z",
+  "data": {
+    "headers": {
+      "accept-encoding": "gzip",
+      "authorization": "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhcGlfa2V5IjoiZThmMjVkODMiLCJpc3MiOiJWb25hZ2UiLCJwYXlsb2FkX2hhc2giOiI2MjFlNzUxNzU4NTZmMDMwYmZkNGRjNjY2OWVhOTJjZDNiODVhZjUyNDE5YTBkNDRlMmYyZGVmN2IzYTExZGQ3IiwiaWF0IjoxNzQyMjY2ODQ2LCJhcHBsaWNhdGlvbl9pZCI6IjYyZmFiNmQ3LTJkZmUtNDVhYi1hOTM3LTZhN2Q5YzZlN2EzOSIsImp0aSI6ImYxMmExYzU0LWIwNzEtNDAyZC05NWY0LTEzMzA3YWFhODQxZiJ9.205AYd6Ib6jD1iCiyG_qemNdi2X1NzPmwLMzfGuJsLY",
+      "content-length": "185",
+      "content-type": "application/json",
+      "host": "76d5-2607-fb90-615d-7759-24c9-f17a-9dce-afd0.ngrok-free.app",
+      "user-agent": "Vonage Voice API (version: v1)",
+      "x-forwarded-for": "216.147.2.101",
+      "x-forwarded-host": "76d5-2607-fb90-615d-7759-24c9-f17a-9dce-afd0.ngrok-free.app",
+      "x-forwarded-port": "3000",
+      "x-forwarded-proto": "https"
+    },
+    "body": {
+      "reason": "Connect action contains +15108960695 already in the conversation",
+      "timestamp": "2025-03-18T03:00:46.239187693Z",
+      "conversation_uuid": "CON-20882bd4-2bc0-4a75-b057-95a082bee4c5"
+    }
+  }
+}

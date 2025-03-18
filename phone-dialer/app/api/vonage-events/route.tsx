@@ -3,6 +3,15 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 
+// Maintain a simple in-memory store of completed call IDs
+// In a production app, you would use a database or Redis for this
+const completedCallIds = new Set();
+
+// Export this function to check if a call is completed
+export function isCallCompleted(callId: string): boolean {
+  return completedCallIds.has(callId);
+}
+
 // Helper to log events to a file for better debugging
 const logToFile = async (data: any) => {
   try {
@@ -30,7 +39,7 @@ const logToFile = async (data: any) => {
 export async function POST(request: Request) {
   try {
     // Log raw request details
-    console.log('Vonage event received. Headers:', JSON.stringify(request.headers, null, 2));
+    console.log('Vonage event received. Headers:', JSON.stringify(Object.fromEntries(request.headers.entries()), null, 2));
     
     // Get request body as text first
     const bodyText = await request.text();
@@ -42,20 +51,39 @@ export async function POST(request: Request) {
       eventData = JSON.parse(bodyText);
     } catch (error) {
       console.log('Not JSON, treating as form data');
-      // Handle form data or other formats
-      eventData = { rawBody: bodyText };
+      // Parse form data
+      const formData = new URLSearchParams(bodyText);
+      eventData = Object.fromEntries(formData.entries());
     }
     
     // Log to file for detailed analysis
-    await logToFile({ headers: Object.fromEntries(request.headers.entries()), body: eventData });
+    await logToFile({ 
+      headers: Object.fromEntries(request.headers.entries()), 
+      body: eventData 
+    });
+    
+    // Check for completed calls
+    if (eventData.status === 'completed' && eventData.uuid) {
+      console.log(`Call ${eventData.uuid} marked as completed`);
+      completedCallIds.add(eventData.uuid);
+    }
     
     // Process different event types
     if (eventData.status) {
       switch (eventData.status) {
         case 'started':
           console.log(`Call ${eventData.uuid} has started`);
-          break;
-        
+          
+          // Return NCCO for this call - use a simpler NCCO
+          return NextResponse.json([
+            {
+              "action": "talk",
+              "text": "Hello, this is your digital payphone call. You are now connected.",
+              "language": "en-US"
+            }
+            // We don't add a "connect" action here - let Vonage handle the connection
+          ]);
+          
         case 'ringing':
           console.log(`Call ${eventData.uuid} is ringing`);
           break;
@@ -66,6 +94,7 @@ export async function POST(request: Request) {
           
         case 'completed':
           console.log(`Call ${eventData.uuid} has completed. Reason: ${eventData.reason || 'None provided'}`);
+          completedCallIds.add(eventData.uuid);
           break;
           
         case 'rejected':
@@ -73,21 +102,11 @@ export async function POST(request: Request) {
         case 'cancelled':
         case 'failed':
           console.log(`Call ${eventData.uuid} failed with status: ${eventData.status}. Reason: ${eventData.reason || 'None provided'}`);
+          completedCallIds.add(eventData.uuid);
           break;
           
         default:
           console.log(`Call ${eventData.uuid} has status: ${eventData.status}`);
-      }
-    }
-    
-    // Handle websocket specific events
-    if (eventData.type) {
-      if (eventData.type.includes('websocket')) {
-        console.log(`WebSocket event for call ${eventData.uuid}: ${eventData.type}`);
-        
-        if (eventData.type === 'websocket:error') {
-          console.error(`WebSocket error for call ${eventData.uuid}:`, eventData.error || 'No error details');
-        }
       }
     }
     
@@ -96,7 +115,7 @@ export async function POST(request: Request) {
       status: 'success',
       timestamp: new Date().toISOString()
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error processing Vonage event:', error);
     return NextResponse.json(
       { 
@@ -119,6 +138,12 @@ export async function GET(request: Request) {
   // Log to file for analysis
   await logToFile({ method: 'GET', params });
   
+  // Check for completed calls
+  if (params.status === 'completed' && params.uuid) {
+    console.log(`Call ${params.uuid} marked as completed via GET`);
+    completedCallIds.add(params.uuid);
+  }
+  
   // Process status events from query params
   if (params.status) {
     const status = params.status;
@@ -126,32 +151,14 @@ export async function GET(request: Request) {
     
     console.log(`Call ${uuid} status update: ${status}`);
     
-    switch (status) {
-      case 'started':
-        console.log(`Call ${uuid} has started`);
-        break;
-      
-      case 'ringing':
-        console.log(`Call ${uuid} is ringing`);
-        break;
-        
-      case 'answered':
-        console.log(`Call ${uuid} was answered`);
-        break;
-        
-      case 'completed':
-        console.log(`Call ${uuid} has completed. Reason: ${params.reason || 'None provided'}`);
-        break;
-        
-      case 'rejected':
-      case 'busy':
-      case 'cancelled':
-      case 'failed':
-        console.log(`Call ${uuid} failed with status: ${status}. Reason: ${params.reason || 'None provided'}`);
-        break;
-        
-      default:
-        console.log(`Call ${uuid} has status: ${status}`);
+    // Similar handling as in the POST method
+    if (status === 'answered') {
+      console.log(`Call ${uuid} was answered`);
+    } else if (status === 'completed' || status === 'rejected' || status === 'busy' || status === 'cancelled' || status === 'failed') {
+      console.log(`Call ${uuid} ended with status: ${status}`);
+      if (uuid !== 'unknown') {
+        completedCallIds.add(uuid);
+      }
     }
   }
   
