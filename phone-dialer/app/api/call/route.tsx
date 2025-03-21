@@ -30,7 +30,7 @@ export async function POST(request: Request) {
       );
     }
     
-    // Attempt to initiate call
+    // Attempt to initiate call using the WebSocket-enabled method
     const result = await initiateCall(toNumber);
     
     console.log('Call initiation result:', result);
@@ -53,7 +53,8 @@ export async function POST(request: Request) {
       success: true,
       message: 'Call initiated successfully',
       callId: result.callId,
-      sessionId
+      sessionId,
+      websocketUrl: result.details?.websocketUrl
     });
     
   } catch (error: any) {

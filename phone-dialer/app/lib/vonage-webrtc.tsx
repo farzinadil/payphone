@@ -51,7 +51,16 @@ export async function initiateCall(toNumber: string): Promise<CallResponse> {
     const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
     console.log(`Using base URL: ${baseUrl}`);
     
-    // Create a simplified NCCO - avoid trying to connect to the same number twice
+    // Create WebSocket endpoint for Vonage to connect to
+    // We'll use a standard format: wss://<domain>/ws/vonage/<callId>
+    const wsProtocol = baseUrl.startsWith('https') ? 'wss' : 'ws';
+    const wsBaseUrl = baseUrl.replace(/^https?:\/\//, '');  // Remove http:// or https://
+    const wsUrl = `${wsProtocol}://${wsBaseUrl}/ws/vonage/${callId}`;
+    
+    console.log(`WebSocket URL for Vonage: ${wsUrl}`);
+    
+    // Create an NCCO (Nexmo Call Control Object) as described in the documentation
+    // This NCCO will first greet the caller, then connect them to our WebSocket
     const ncco = [
       {
         "action": "talk",
@@ -63,8 +72,13 @@ export async function initiateCall(toNumber: string): Promise<CallResponse> {
         "from": fromNumber,
         "endpoint": [
           {
-            "type": "phone",
-            "number": toNumber.replace(/[^0-9+]/g, '') // Clean the phone number
+            "type": "websocket",
+            "uri": wsUrl,
+            "content-type": "audio/l16;rate=16000",
+            "headers": {
+              "call-id": callId,
+              "session-id": callId
+            }
           }
         ]
       }
@@ -116,7 +130,8 @@ export async function initiateCall(toNumber: string): Promise<CallResponse> {
       message: 'Call initiated successfully',
       callId: responseData.uuid || callId,
       details: {
-        ourCallId: callId
+        ourCallId: callId,
+        websocketUrl: wsUrl
       }
     };
     

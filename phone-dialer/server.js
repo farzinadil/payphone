@@ -9,9 +9,8 @@ const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
 const handle = app.getRequestHandler();
 
-// Maps to track connections
-const sessions = new Map();
-const vonageConnections = new Map();
+// Store active WebSocket connections
+const activeConnections = new Map();
 
 // Prepare Next.js app, then set up the server
 app.prepare().then(() => {
@@ -22,154 +21,162 @@ app.prepare().then(() => {
 
   // Create WebSocket server
   const wss = new WebSocket.Server({ noServer: true });
-
-  // WebRTC signaling server
-  const signalingWss = new WebSocket.Server({ noServer: true });
   
-  // Handle WebSocket upgrade requests
+  // WebSocket upgrade handling
   server.on('upgrade', (req, socket, head) => {
     const { pathname } = parse(req.url);
     
-    if (pathname.startsWith('/api/signaling/')) {
-      // Extract call ID from the path
-      const callId = pathname.split('/api/signaling/')[1];
-      console.log(`WebRTC signaling connection for call: ${callId}`);
-      
-      signalingWss.handleUpgrade(req, socket, head, (ws) => {
-        setupSignalingConnection(ws, callId);
-      });
-    } else if (pathname.startsWith('/api/vonage-voice/')) {
-      // Extract Vonage call ID from the path
-      const vonageCallId = pathname.split('/api/vonage-voice/')[1];
-      console.log(`Vonage voice connection for call: ${vonageCallId}`);
+    // Check if this is a Vonage WebSocket path
+    if (pathname.startsWith('/ws/vonage/')) {
+      const callId = pathname.replace('/ws/vonage/', '');
+      console.log(`Vonage WebSocket connection for call: ${callId}`);
       
       wss.handleUpgrade(req, socket, head, (ws) => {
-        setupVonageConnection(ws, vonageCallId);
+        handleVonageConnection(ws, callId);
       });
-    } else {
-      // Reject other WebSocket connections
+    }
+    // Check if this is a browser WebSocket path
+    else if (pathname.startsWith('/ws/browser/')) {
+      const callId = pathname.replace('/ws/browser/', '');
+      console.log(`Browser WebSocket connection for call: ${callId}`);
+      
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        handleBrowserConnection(ws, callId);
+      });
+    }
+    else {
+      // Not a valid WebSocket path
       socket.destroy();
     }
   });
   
-  // Setup WebRTC signaling connection
-  function setupSignalingConnection(ws, callId) {
-    console.log(`Setting up WebRTC signaling for call: ${callId}`);
+  // Handle Vonage WebSocket connection
+  function handleVonageConnection(ws, callId) {
+    console.log(`New Vonage connection for call: ${callId}`);
     
-    // Create session if it doesn't exist
-    if (!sessions.has(callId)) {
-      sessions.set(callId, {
-        id: callId,
-        connections: new Set(),
-        vonageCallId: null
+    // Store the connection
+    if (!activeConnections.has(callId)) {
+      activeConnections.set(callId, { 
+        vonage: null, 
+        browser: null,
+        callId: callId,
+        startTime: new Date() 
       });
     }
     
-    const session = sessions.get(callId);
-    session.connections.add(ws);
+    const connection = activeConnections.get(callId);
+    connection.vonage = ws;
     
-    // Send welcome message
+    // Send initial connection message as described in Vonage docs
+    // This is the "First message" that needs to be sent when Vonage connects
     ws.send(JSON.stringify({
-      type: 'welcome',
-      callId,
-      time: new Date().toISOString()
+      "event": "websocket:connected",
+      "content-type": "audio/l16;rate=16000",
+      "call-id": callId
     }));
-
-    // Handle WebRTC signaling messages
+    
+    // Handle incoming messages from Vonage
     ws.on('message', (message) => {
-      try {
-        const data = JSON.parse(message);
-        console.log(`Received signaling message: ${data.type}`);
-        
-        // Store Vonage call ID if provided
-        if (data.type === 'vonage-call-id' && data.vonageCallId) {
-          session.vonageCallId = data.vonageCallId;
-          console.log(`Associated session ${callId} with Vonage call ${data.vonageCallId}`);
-        }
-        
-        // Broadcast to all other peers in this session
-        session.connections.forEach((peer) => {
-          if (peer !== ws && peer.readyState === WebSocket.OPEN) {
-            peer.send(message);
+      // Check if this is a text message (JSON) or binary (audio)
+      if (typeof message === 'string' || message instanceof Buffer && message.toString().startsWith('{')) {
+        // It's a text message, likely JSON
+        try {
+          const jsonMessage = JSON.parse(message.toString());
+          console.log('Received JSON message from Vonage:', jsonMessage);
+          
+          // Forward the message to the browser if connected
+          if (connection.browser && connection.browser.readyState === WebSocket.OPEN) {
+            connection.browser.send(message.toString());
           }
-        });
-      } catch (error) {
-        console.error('Error handling signaling message:', error);
+        } catch (error) {
+          console.error('Error parsing JSON message from Vonage:', error);
+        }
+      } else {
+        // It's a binary message, likely audio data
+        // Forward it to the browser if connected
+        if (connection.browser && connection.browser.readyState === WebSocket.OPEN) {
+          connection.browser.send(message);
+        }
       }
     });
     
     // Handle connection close
     ws.on('close', () => {
-      console.log(`WebRTC signaling connection closed for call: ${callId}`);
-      
-      // Remove this connection
-      session.connections.delete(ws);
-      
-      // If no connections left, clean up the session
-      if (session.connections.size === 0) {
-        sessions.delete(callId);
+      console.log(`Vonage connection closed for call: ${callId}`);
+      if (connection) {
+        connection.vonage = null;
+        
+        // Notify browser that Vonage disconnected
+        if (connection.browser && connection.browser.readyState === WebSocket.OPEN) {
+          connection.browser.send(JSON.stringify({
+            event: 'call-ended',
+            reason: 'Vonage disconnected',
+            timestamp: new Date().toISOString()
+          }));
+        }
+        
+        // Clean up if no connections left
+        if (!connection.browser) {
+          activeConnections.delete(callId);
+        }
       }
+    });
+    
+    ws.on('error', (error) => {
+      console.error(`Vonage WebSocket error for call ${callId}:`, error);
     });
   }
   
-  // Setup Vonage voice connection
-  function setupVonageConnection(ws, vonageCallId) {
-    console.log(`Setting up Vonage voice connection for call: ${vonageCallId}`);
+  // Handle browser WebSocket connection
+  function handleBrowserConnection(ws, callId) {
+    console.log(`New browser connection for call: ${callId}`);
     
-    // Store this connection
-    vonageConnections.set(vonageCallId, ws);
-    
-    // Find associated WebRTC session
-    let associatedSession = null;
-    
-    for (const [_, session] of sessions.entries()) {
-      if (session.vonageCallId === vonageCallId) {
-        associatedSession = session;
-        break;
-      }
+    // Store the connection
+    if (!activeConnections.has(callId)) {
+      activeConnections.set(callId, { 
+        vonage: null, 
+        browser: null,
+        callId: callId,
+        startTime: new Date() 
+      });
     }
     
-    if (associatedSession) {
-      console.log(`Found associated WebRTC session ${associatedSession.id} for Vonage call ${vonageCallId}`);
-    } else {
-      console.log(`No WebRTC session found for Vonage call ${vonageCallId}`);
-    }
+    const connection = activeConnections.get(callId);
+    connection.browser = ws;
     
-    // Handle Vonage audio data
+    // Send welcome message to browser
+    ws.send(JSON.stringify({
+      event: 'connected',
+      callId: callId,
+      timestamp: new Date().toISOString()
+    }));
+    
+    // Handle incoming messages from browser
     ws.on('message', (message) => {
-      if (associatedSession) {
-        // Forward audio data to all WebRTC connections in the session
-        associatedSession.connections.forEach((peer) => {
-          if (peer.readyState === WebSocket.OPEN) {
-            // Forward binary audio data to WebRTC clients
-            peer.send(JSON.stringify({
-              type: 'voice-data',
-              callId: associatedSession.id,
-              // Convert binary data to base64 for transmission
-              data: message.toString('base64')
-            }));
-          }
-        });
+      // Check if we have a Vonage connection
+      if (connection.vonage && connection.vonage.readyState === WebSocket.OPEN) {
+        // Forward the message to Vonage
+        // Note: Browser should send binary audio data in the correct format
+        // (PCM 16-bit, 16kHz or 8kHz sample rate as configured)
+        connection.vonage.send(message);
       }
     });
     
     // Handle connection close
     ws.on('close', () => {
-      console.log(`Vonage voice connection closed for call: ${vonageCallId}`);
-      vonageConnections.delete(vonageCallId);
-      
-      // Notify WebRTC clients that the call has ended
-      if (associatedSession) {
-        associatedSession.connections.forEach((peer) => {
-          if (peer.readyState === WebSocket.OPEN) {
-            peer.send(JSON.stringify({
-              type: 'call-ended',
-              callId: associatedSession.id,
-              reason: 'Vonage connection closed'
-            }));
-          }
-        });
+      console.log(`Browser connection closed for call: ${callId}`);
+      if (connection) {
+        connection.browser = null;
+        
+        // Clean up if no connections left
+        if (!connection.vonage) {
+          activeConnections.delete(callId);
+        }
       }
+    });
+    
+    ws.on('error', (error) => {
+      console.error(`Browser WebSocket error for call ${callId}:`, error);
     });
   }
   
@@ -178,7 +185,6 @@ app.prepare().then(() => {
   server.listen(PORT, (err) => {
     if (err) throw err;
     console.log(`> Ready on http://localhost:${PORT}`);
-    console.log(`> WebRTC signaling server running on ws://localhost:${PORT}/api/signaling/[callId]`);
-    console.log(`> Vonage voice server running on ws://localhost:${PORT}/api/vonage-voice/[vonageCallId]`);
+    console.log(`> WebSocket server running on ws://localhost:${PORT}/ws/`);
   });
 });

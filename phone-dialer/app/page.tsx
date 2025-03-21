@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { useWebRTC } from './lib/webrtc-client';
+import { useAudioWebSocket } from './lib/audio-websocket';
 
 // TypeScript interfaces
 interface CountryCode {
@@ -40,29 +40,33 @@ export default function Home() {
   // Status check interval reference
   const statusCheckRef = useRef<NodeJS.Timeout | null>(null);
   
-  // Initialize WebRTC
+  // Initialize WebSocket audio
   const { 
-    isConnected: isWebRTCConnected,
-    isConnecting: isWebRTCConnecting,
-    initialize: initializeWebRTC,
-    disconnect: disconnectWebRTC,
-    sendMessage: sendWebRTCMessage
-  } = useWebRTC({
+    isConnected: isAudioConnected,
+    isConnecting: isAudioConnecting,
+    connect: connectAudio,
+    disconnect: disconnectAudio
+  } = useAudioWebSocket({
     callId: sessionIdRef.current,
     onConnected: () => {
-      console.log('WebRTC connected successfully');
+      console.log('Audio WebSocket connected successfully');
     },
     onDisconnected: () => {
-      console.log('WebRTC disconnected');
-      if (callState.isActive) {
-        endCurrentCall();
+      console.log('Audio WebSocket disconnected');
+      // If we weren't intentionally ending the call, handle unexpected disconnection
+      if (callState.isActive && !callState.isEnding) {
+        endCurrentCall(true);
       }
     },
     onError: (error) => {
-      console.error('WebRTC error:', error);
+      console.error('Audio WebSocket error:', error);
       if (callState.isActive) {
         endCurrentCall(true);
       }
+    },
+    onCallEnded: () => {
+      console.log('Call ended event received from WebSocket');
+      endCurrentCall(true);
     }
   });
   
@@ -137,7 +141,6 @@ export default function Home() {
     }, 2000);
   };
   
-  
   const stopStatusCheck = () => {
     if (statusCheckRef.current) {
       clearInterval(statusCheckRef.current);
@@ -174,9 +177,6 @@ export default function Home() {
           isInitiating: true
         }));
         
-        // Initialize WebRTC
-        await initializeWebRTC();
-        
         // Call our API route to initiate the call
         const response = await fetch('/api/call', {
           method: 'POST',
@@ -193,6 +193,9 @@ export default function Home() {
         
         if (response.ok && data.success) {
           console.log('Call initiated successfully:', data);
+          
+          // Connect to audio WebSocket
+          await connectAudio();
           
           // Update call state
           setCallState({
@@ -213,9 +216,6 @@ export default function Home() {
         } else {
           console.error('Error initiating call:', data);
           
-          // Disconnect WebRTC if call initiation failed
-          disconnectWebRTC();
-          
           // Reset call state
           setCallState({
             isActive: false,
@@ -230,9 +230,6 @@ export default function Home() {
         }
       } catch (error) {
         console.error('Error making API call:', error);
-        
-        // Disconnect WebRTC
-        disconnectWebRTC();
         
         // Reset call state
         setCallState({
@@ -262,8 +259,8 @@ export default function Home() {
         isEnding: true
       }));
       
-      // Disconnect WebRTC
-      disconnectWebRTC();
+      // Disconnect audio WebSocket
+      disconnectAudio();
       
       // Stop status check
       stopStatusCheck();
@@ -326,7 +323,7 @@ export default function Home() {
     return () => {
       stopCallTimer();
       stopStatusCheck();
-      disconnectWebRTC();
+      disconnectAudio();
     };
   }, []);
   
@@ -389,14 +386,14 @@ export default function Home() {
             <span className="text-xl font-semibold">
               Call Duration: {formatDuration(callState.duration)}
             </span>
-            {isWebRTCConnected && (
+            {isAudioConnected && (
               <div className="mt-2 text-green-600 text-sm">
-                Connected
+                Audio Connected
               </div>
             )}
-            {isWebRTCConnecting && (
+            {isAudioConnecting && (
               <div className="mt-2 text-yellow-600 text-sm">
-                Connecting...
+                Connecting Audio...
               </div>
             )}
           </div>
